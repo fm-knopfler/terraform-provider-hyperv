@@ -73,6 +73,34 @@ function Save-HypervHttpFile {
     } finally { $response.Dispose() }
 }
 
+# Move-HypervImageFileIntoPlace renames $StagingPath to $DestinationPath.
+# Move-Item -Force can fail with "already exists" whenever the destination
+# is already populated -- a second resource pointed at the same path, a
+# recreate after keep_on_destroy, or a genuine concurrent write. On that
+# failure, adopt the destination if its hash matches $StagingPath (the
+# documented SHA-skip no-op); otherwise re-throw as a real conflict.
+function Move-HypervImageFileIntoPlace {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $StagingPath,
+        [Parameter(Mandatory)] [string] $DestinationPath
+    )
+    try {
+        Move-Item -LiteralPath $StagingPath -Destination $DestinationPath -Force -ErrorAction Stop
+    }
+    catch {
+        if ((Test-Path -LiteralPath $StagingPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $DestinationPath -PathType Leaf)) {
+            $stagedHash = (Get-FileHash -LiteralPath $StagingPath     -Algorithm SHA256).Hash.ToLowerInvariant()
+            $destHash   = (Get-FileHash -LiteralPath $DestinationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($stagedHash -eq $destHash) {
+                return
+            }
+        }
+        throw
+    }
+}
+
 # Read-HypervImageFileResult emits the canonical three-field result shape.
 # Inline duplicate of get.ps1's tail because the runtime concatenates only
 # preamble + a single verb script per call (no cross-script helpers).
@@ -130,7 +158,7 @@ function New-HypervImageFileFromUrl {
                 throw $errorRecord
             }
         }
-        Move-Item -LiteralPath $tempPath -Destination $DestinationPath -Force -ErrorAction Stop
+        Move-HypervImageFileIntoPlace -StagingPath $tempPath -DestinationPath $DestinationPath
     }
     finally {
         # Cleanup is best-effort: a failure to remove the .part should not
@@ -216,9 +244,9 @@ function Invoke-HypervDvdSafeReplace {
     }
 
     if ($attached.Count -eq 0) {
-        # No VM holds the lock -- straight Move-Item -Force, same shape
-        # as the non-dvd-aware path.
-        Move-Item -LiteralPath $StagingPath -Destination $DestinationPath -Force -ErrorAction Stop
+        # No VM holds the lock -- straight move, same shape as the
+        # non-dvd-aware path.
+        Move-HypervImageFileIntoPlace -StagingPath $StagingPath -DestinationPath $DestinationPath
         return
     }
 
@@ -340,7 +368,7 @@ function New-HypervImageFileFromLocalPath {
             Invoke-HypervDvdSafeReplace -StagingPath $StagingPath -DestinationPath $DestinationPath
         }
         else {
-            Move-Item -LiteralPath $StagingPath -Destination $DestinationPath -Force -ErrorAction Stop
+            Move-HypervImageFileIntoPlace -StagingPath $StagingPath -DestinationPath $DestinationPath
         }
     }
     finally {

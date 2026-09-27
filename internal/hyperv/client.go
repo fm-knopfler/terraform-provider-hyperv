@@ -1,6 +1,7 @@
 package hyperv
 
 import (
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -39,10 +40,31 @@ import (
 //
 // One RWMutex per Client is correct because NetNat is host-singleton:
 // there's exactly one ordering of NetNat writes per host.
+//
+// imageFileLocks serializes writes to a given destination_path (image
+// file and VHD copy methods), so two resources genuinely running in
+// parallel don't overlap inside new.ps1's verify-then-rename. new.ps1's
+// hash-match adoption (see Move-HypervImageFileIntoPlace) is the main
+// fix for a shared destination_path; this lock only covers true
+// concurrent applies. Keyed per-path so unrelated images still write
+// in parallel.
 type Client struct {
-	runner     connection.Runner
-	httpClient *http.Client
-	netNatMu   sync.RWMutex
+	runner         connection.Runner
+	httpClient     *http.Client
+	netNatMu       sync.RWMutex
+	imageFileLocks sync.Map // map[string]*sync.Mutex, keyed by destination_path
+}
+
+// lockDestinationPath returns an unlock func for destinationPath's lock.
+// Call as: defer c.lockDestinationPath(path)().
+func (c *Client) lockDestinationPath(destinationPath string) func() {
+	v, _ := c.imageFileLocks.LoadOrStore(destinationPath, &sync.Mutex{})
+	mu, ok := v.(*sync.Mutex)
+	if !ok {
+		panic(fmt.Sprintf("imageFileLocks: stored %T for %q, want *sync.Mutex", v, destinationPath))
+	}
+	mu.Lock()
+	return mu.Unlock
 }
 
 // ClientOption customizes a Client at construction time. Functional-
