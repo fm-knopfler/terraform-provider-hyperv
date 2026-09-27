@@ -1550,7 +1550,7 @@ func TestClient_RemoveImageFile_HappyPath(t *testing.T) {
 		On("function Remove-HypervImageFile").Return("", "", 0)
 	c := NewClient(fr)
 
-	if err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{Path: "C:\\images\\to-delete.vhdx"}); err != nil {
+	if err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{DestinationPath: "C:\\images\\to-delete.vhdx"}); err != nil {
 		t.Fatalf("RemoveImageFile: %v", err)
 	}
 
@@ -1573,7 +1573,7 @@ func TestClient_RemoveImageFile_ObjectNotFoundMapsToErrNotFound(t *testing.T) {
 		On("function Remove-HypervImageFile").Return("", envelope, 1)
 	c := NewClient(fr)
 
-	err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{Path: "C:\\images\\already-gone.vhdx"})
+	err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{DestinationPath: "C:\\images\\already-gone.vhdx"})
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
@@ -1591,8 +1591,8 @@ func TestClient_RemoveImageFile_ContentDriftMapsToErrContentDrift(t *testing.T) 
 	c := NewClient(fr)
 
 	err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{
-		Path:           "C:\\images\\shared-base.vhdx",
-		ExpectedSha256: "abc123",
+		DestinationPath: "C:\\images\\shared-base.vhdx",
+		ExpectedSha256:  "abc123",
 	})
 	if !errors.Is(err, ErrContentDrift) {
 		t.Errorf("err = %v, want ErrContentDrift", err)
@@ -1611,8 +1611,8 @@ func TestClient_RemoveImageFile_ForwardsExpectedSha256InStdin(t *testing.T) {
 	c := NewClient(fr)
 
 	if err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{
-		Path:           "C:\\images\\seed.iso",
-		ExpectedSha256: "abc123",
+		DestinationPath: "C:\\images\\seed.iso",
+		ExpectedSha256:  "abc123",
 	}); err != nil {
 		t.Fatalf("RemoveImageFile: %v", err)
 	}
@@ -1634,13 +1634,71 @@ func TestClient_RemoveImageFile_ForwardsForceTrueInStdin(t *testing.T) {
 		On("function Remove-HypervImageFile").Return("", "", 0)
 	c := NewClient(fr)
 
-	if err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{Path: "C:\\images\\seed.iso", Force: true}); err != nil {
+	if err := c.RemoveImageFile(t.Context(), RemoveImageFileInput{DestinationPath: "C:\\images\\seed.iso", Force: true}); err != nil {
 		t.Fatalf("RemoveImageFile: %v", err)
 	}
 
 	stdin := string(fr.Calls()[0].StdinJSON)
 	if !strings.Contains(stdin, `"force":true`) {
 		t.Errorf("stdin should forward force=true as snake_case JSON; got: %s", stdin)
+	}
+}
+
+// Two resources sharing a destination_path can have Terraform destroy
+// both in parallel; a delete racing a sibling's delete on the same file
+// must never overlap inside RunScript, or the loser sees a sharing
+// violation indistinguishable from an antivirus lock.
+func TestClient_RemoveImageFile_SerializesSameDestinationPath(t *testing.T) {
+	t.Parallel()
+
+	runner := &concurrentDestRunner{}
+	c := NewClient(runner)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = c.RemoveImageFile(context.Background(), RemoveImageFileInput{DestinationPath: "C:\\images\\shared-base.vhdx"})
+		}()
+	}
+	wg.Wait()
+
+	if runner.maxInFlight > 1 {
+		t.Fatalf("maxInFlight = %d, want 1: concurrent RemoveImageFile calls for the same destination_path must serialize", runner.maxInFlight)
+	}
+}
+
+// Mixing a write method with RemoveImageFile on the same destination_path
+// proves the lock spans create and destroy together, not just calls to
+// the same method -- the two prior tests each only exercise one method
+// racing itself.
+func TestClient_CopyHostFileAndRemoveImageFile_SerializeSameDestinationPath(t *testing.T) {
+	t.Parallel()
+
+	runner := &concurrentDestRunner{}
+	c := NewClient(runner)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.CopyHostFile(context.Background(), CopyHostFileInput{
+				DestinationPath: "C:\\images\\shared-base.vhdx",
+				SourcePath:      "D:\\images\\source.vhdx",
+			})
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = c.RemoveImageFile(context.Background(), RemoveImageFileInput{DestinationPath: "C:\\images\\shared-base.vhdx"})
+		}()
+	}
+	wg.Wait()
+
+	if runner.maxInFlight > 1 {
+		t.Fatalf("maxInFlight = %d, want 1: concurrent CopyHostFile and RemoveImageFile calls for the same destination_path must serialize", runner.maxInFlight)
 	}
 }
 
