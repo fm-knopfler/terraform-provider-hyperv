@@ -1,15 +1,10 @@
-# _test_helpers.ps1 -- shared Pester setup for the vhd verb scripts.
-# Underscore prefix keeps it out of Pester's *.Tests.ps1 discovery glob.
-#
-# Stubs for the Hyper-V cmdlets the vhd scripts call. Same rationale as
-# vswitch's test helper: when the real Hyper-V module is loaded, its
-# parameter sets impose constraints that drop bound values during Pester
-# mock interactions on PS 5.1. Stub functions with simple parameter sets
-# sidestep that.
-#
-# In production scripts run via -EncodedCommand in a fresh runspace, so
-# the real cmdlets are still used; this shadow only applies to test
-# execution.
+# _test_helpers.ps1 -- shared Pester setup for the vhd verb scripts,
+# underscore-prefixed to stay out of Pester's *.Tests.ps1 discovery
+# glob. Stubs the Hyper-V cmdlets the vhd scripts call, since the real
+# module's parameter sets drop bound values during Pester mock
+# interactions on PS 5.1; these simplified signatures sidestep that.
+# Production scripts run via -EncodedCommand in a fresh runspace and
+# never see this shadow.
 
 function Get-VHD {
     [CmdletBinding()]

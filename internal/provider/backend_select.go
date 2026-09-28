@@ -17,11 +17,9 @@ import (
 )
 
 // newConnection translates a HypervProviderModel into a configured
-// connection.Connection. Precedence: provider attribute > env var >
-// error/zero.
-//
-// This is the **only** place env vars are read. Resources never touch
-// os.Getenv directly.
+// connection.Connection, with precedence provider attribute > env var
+// > error/zero. This is the only place env vars are read; resources
+// never touch os.Getenv directly.
 func newConnection(_ context.Context, m HypervProviderModel) (connection.Connection, diag.Diagnostics) {
 	var diags diag.Diagnostics
 
@@ -44,13 +42,12 @@ func newConnection(_ context.Context, m HypervProviderModel) (connection.Connect
 	}
 }
 
-// newSSHConnection translates a HypervProviderModel into a configured SSH
-// Connection. Resolves auth + host config from provider attributes with
-// HYPERV_SSH_* / HYPERV_HOST / etc. env-var fallbacks.
-//
-// Returns nil with attribute-anchored diagnostics on configuration errors so
-// the operator sees which knob to adjust. The dial itself happens in Open
-// (called from provider.Configure right after this function returns).
+// newSSHConnection translates a HypervProviderModel into a configured
+// SSH Connection, resolving auth + host config from provider
+// attributes with HYPERV_SSH_* / HYPERV_HOST / etc. env-var
+// fallbacks. Returns nil with attribute-anchored diagnostics on
+// configuration errors; the dial itself happens in Open, called from
+// provider.Configure right after this function returns.
 func newSSHConnection(m HypervProviderModel, diags *diag.Diagnostics) connection.Connection {
 	host := resolveString(m.Host, "HYPERV_HOST", "")
 	if host == "" {
@@ -80,10 +77,7 @@ func newSSHConnection(m HypervProviderModel, diags *diag.Diagnostics) connection
 		)
 		return nil
 	}
-	// Bounds-check at Configure time so an operator misconfiguration
-	// (HYPERV_PORT=99999, or 0, or a negative attribute value) surfaces with
-	// a clear "which knob to turn" diagnostic rather than an opaque OS-level
-	// "invalid port" string from net.Dial later.
+	// Bounds-check here for a clear diagnostic instead of an opaque OS-level "invalid port" string from net.Dial later.
 	if port < 1 || port > 65535 {
 		diags.AddAttributeError(
 			path.Root("port"),
@@ -114,11 +108,7 @@ func newSSHConnection(m HypervProviderModel, diags *diag.Diagnostics) connection
 		return nil
 	}
 
-	// []byte(string) allocates a new copy of the bytes; the source
-	// strings (resolveString's return) remain in the framework's
-	// reflection layer until GC. Zeroing inside the connection layer
-	// scrubs our copy; the framework-owned originals are outside our
-	// reach. See connection.zeroBytes and SSHOptions.Password.
+	// []byte(string) copies; connection.zeroBytes can scrub our copy but not the framework-owned original string.
 	conn, err := connection.NewSSH(connection.SSHOptions{
 		Host:           host,
 		Port:           port,
@@ -154,14 +144,13 @@ func resolveDuration(attr types.String, envVar string) (time.Duration, error) {
 	return d, nil
 }
 
-// newWinRMConnection translates a HypervProviderModel into a configured WinRM
-// Connection. Resolves auth + transport config from provider attributes with
-// HYPERV_WINRM_* / HYPERV_HOST / etc. env-var fallbacks.
-//
-// Returns nil with attribute-anchored diagnostics on configuration errors so
-// the operator sees which knob to adjust. The HTTP client and the auth
-// round-trip happen in Open (called from provider.Configure right after this
-// function returns).
+// newWinRMConnection translates a HypervProviderModel into a
+// configured WinRM Connection, resolving auth + transport config from
+// provider attributes with HYPERV_WINRM_* / HYPERV_HOST / etc. env-var
+// fallbacks. Returns nil with attribute-anchored diagnostics on
+// configuration errors; the HTTP client and auth round-trip happen in
+// Open, called from provider.Configure right after this function
+// returns.
 func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connection.Connection {
 	host := resolveString(m.Host, "HYPERV_HOST", "")
 	if host == "" {
@@ -208,10 +197,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 	auth := resolveString(winrmAttrs.Auth, "HYPERV_WINRM_AUTH", "ntlm")
 	cacert := resolveString(winrmAttrs.CACert, "HYPERV_WINRM_CACERT", "")
 
-	// Kerberos sub-block is optional; absent means types.StringNull() for
-	// every field, which resolveString collapses to the env-var fallback
-	// or the empty default. This matches how WinRMConfig itself is
-	// handled when winrm = {} is omitted entirely.
+	// Absent Kerberos sub-block means null for every field, which resolveString collapses to env-var fallback or empty.
 	var krbAttrs WinRMKerberosConfig
 	if winrmAttrs.Kerberos != nil {
 		krbAttrs = *winrmAttrs.Kerberos
@@ -221,12 +207,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 	krbConfigPath := resolveString(krbAttrs.ConfigPath, "HYPERV_KRB5_CONF_PATH", "")
 	krbCCachePath := resolveString(krbAttrs.CCachePath, "HYPERV_KRB5_CCACHE_PATH", "")
 
-	// Password gate: NTLM and Basic both require one. Kerberos has its
-	// own credential rules (password OR ccache_path, not both, exactly
-	// one) checked further down. Anchored at path.Root("password") so
-	// the operator sees an inline pointer to the missing field rather
-	// than the generic "WinRM backend initialization failed" wrapping
-	// that NewWinRM's password error would otherwise produce.
+	// NTLM and Basic both require a password; Kerberos has its own credential rules checked further down.
 	if password == "" && auth != "kerberos" {
 		diags.AddAttributeError(
 			path.Root("password"),
@@ -237,11 +218,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 		return nil
 	}
 
-	// Kerberos-specific config gates. Anchored at the actual misconfigured
-	// attribute (winrm.kerberos.<attr> or password) so the operator
-	// sees an inline pointer; without these hoists, NewWinRM's plain-
-	// string errors would surface as a generic "WinRM backend
-	// initialization failed" diagnostic with no attribute context.
+	// Anchored at the actual misconfigured attribute, rather than NewWinRM's generic "backend initialization failed".
 	if auth == "kerberos" {
 		if krbRealm == "" {
 			diags.AddAttributeError(
@@ -253,9 +230,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 			return nil
 		}
 
-		// Credential mode: exactly one of password or ccache_path. Both
-		// is ambiguous (which wins?), neither leaves no way to obtain
-		// a TGT.
+		// Exactly one of password or ccache_path: both is ambiguous, neither leaves no way to obtain a TGT.
 		hasPassword := password != ""
 		hasCCache := krbCCachePath != ""
 		switch {
@@ -279,18 +254,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 			return nil
 		}
 
-		// Host should be an FQDN for Kerberos -- the SPN match keys on
-		// hostname, and bare IPs almost never have an SPN registered.
-		// Two failure modes both want this warning:
-		//   - Short name like "hv-bench-01" -- no dot at all.
-		//   - Raw IPv4/IPv6 like "10.0.0.1" or "fe80::1" -- has dots
-		//     (or colons) but is still not a hostname; net.ParseIP
-		//     catches both forms.
-		// Warning rather than error: a host with a working /etc/hosts
-		// entry that resolves to an FQDN-anchored cert + SPN may pass
-		// fine even if `host` is set to a short name. Users with that
-		// setup should ignore the warning; users without it will see
-		// the warning and the apply-time auth failure together.
+		// Warning, not error: a working /etc/hosts entry can make a short name resolve fine despite the SPN mismatch risk.
 		if !strings.Contains(host, ".") || net.ParseIP(host) != nil {
 			diags.AddAttributeWarning(
 				path.Root("host"),
@@ -305,11 +269,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 		}
 	}
 
-	// Basic auth without HTTPS sends credentials as base64 in the
-	// Authorization header -- effectively cleartext on the wire.
-	// We don't hard-block the combination because it's documented as a
-	// diagnostic tool for TLS-only failures, but a plan-time warning
-	// keeps it from landing silently in production config.
+	// Not hard-blocked, since it's a documented TLS-only diagnostic tool, but a warning keeps it from landing silently.
 	if auth == "basic" && !useHTTPS {
 		diags.AddAttributeWarning(
 			path.Root("winrm").AtName("auth"),
@@ -322,10 +282,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 		)
 	}
 
-	// Default port depends on transport. resolveInt's fallback is the
-	// HTTPS-default; we override below for HTTP so a non-HTTPS operator
-	// who didn't set a port lands on 5985 instead of trying 5986 in
-	// cleartext mode.
+	// A non-HTTPS operator who didn't set a port lands on 5985, not 5986 in cleartext mode.
 	defaultPort := 5986
 	if !useHTTPS {
 		defaultPort = 5985
@@ -368,11 +325,7 @@ func newWinRMConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 		return nil
 	}
 
-	// []byte(string) allocates a new copy of the bytes; the source
-	// string (resolveString's return) remains in the framework's
-	// reflection layer until GC. Zeroing inside the connection layer
-	// scrubs our copy; the framework-owned original is outside our
-	// reach. See connection.zeroBytes and WinRMOptions.Password.
+	// []byte(string) copies; connection.zeroBytes can scrub our copy but not the framework-owned original string.
 	conn, err := connection.NewWinRM(connection.WinRMOptions{
 		Host:           host,
 		Port:           port,
@@ -417,13 +370,11 @@ func newLocalConnection(m HypervProviderModel, diags *diag.Diagnostics) connecti
 	return conn
 }
 
-// resolveInt returns the first set value among:
-//  1. the provider attribute (if known and non-null)
-//  2. the named env var (parsed as int)
-//  3. fallback
-//
-// Returns an error only when an env var is set to a non-integer value -- a
-// missing env var falls through cleanly to the fallback.
+// resolveInt returns the first set value among the provider attribute
+// (if known and non-null), the named env var (parsed as int), then
+// fallback. Returns an error only when an env var is set to a
+// non-integer value; a missing env var falls through cleanly to the
+// fallback.
 func resolveInt(attr types.Int64, envVar string, fallback int) (int, error) {
 	if !attr.IsNull() && !attr.IsUnknown() {
 		return int(attr.ValueInt64()), nil
@@ -438,16 +389,13 @@ func resolveInt(attr types.Int64, envVar string, fallback int) (int, error) {
 	return fallback, nil
 }
 
-// resolveBool returns the first set value among:
-//  1. the provider attribute (if known and non-null)
-//  2. the named env var (case-insensitive: true/false/1/0/t/f/yes/no)
-//  3. fallback
-//
-// An unrecognized env value (e.g. HYPERV_WINRM_USE_HTTPS=disabled) returns
-// an error rather than silently falling back -- matches resolveInt's
-// "fail loud on operator typos" behavior, so a misspelled value surfaces
-// at Configure time instead of producing a confusing TLS handshake error
-// later. An empty env var still falls through to the fallback cleanly.
+// resolveBool returns the first set value among the provider
+// attribute (if known and non-null), the named env var
+// (case-insensitive true/false/1/0/t/f/yes/no), then fallback. An
+// unrecognized env value, e.g. HYPERV_WINRM_USE_HTTPS=disabled,
+// returns an error rather than silently falling back, matching
+// resolveInt's fail-loud behavior; an empty env var still falls
+// through to the fallback cleanly.
 func resolveBool(attr types.Bool, envVar string, fallback bool) (bool, error) {
 	if !attr.IsNull() && !attr.IsUnknown() {
 		return attr.ValueBool(), nil

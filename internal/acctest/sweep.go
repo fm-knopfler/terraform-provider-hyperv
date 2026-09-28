@@ -10,29 +10,21 @@ import (
 	"github.com/windsorcli/terraform-provider-hyperv/internal/hyperv"
 )
 
-// SweepPrefix is the name prefix every acceptance-test resource carries
-// (see internal/acctest.RandomName). Sweepers enumerate resources
-// matching "SweepPrefix*" and delete them; any non-test resource on the
-// bench is invisible to the sweep by construction.
-//
-// Derived from AccTestPrefix rather than spelled as a literal so a
-// future rename of the canonical prefix can't desync the sweep pattern
-// from what RandomName actually emits -- a desync would silently match
-// nothing and let orphans accumulate with the sweeper still exiting 0.
+// SweepPrefix is the name prefix every acceptance-test resource
+// carries (see RandomName). Sweepers enumerate resources matching
+// "SweepPrefix*" and delete them, so any non-test resource on the
+// bench is invisible to the sweep by construction. Derived from
+// AccTestPrefix rather than spelled as a literal so a rename of the
+// canonical prefix can't desync the sweep pattern from what
+// RandomName actually emits.
 const SweepPrefix = AccTestPrefix + "-"
 
 // NewClientForSweep builds a hyperv.Client from the same HYPERV_* env
 // vars NewClient uses, but for sweeper context where no *testing.T is
-// available. Returns the client, a close func the caller MUST defer,
-// and an error.
-//
-// Why not just refactor NewClient: sweepers run outside the test
-// framework's gating, so a missing HYPERV_BACKEND must be a sweeper
-// error (so -sweep-allow-failures can decide whether to continue),
-// not a t.Skip. The connection-building switch is duplicated here
-// rather than extracted to a shared helper because the error-handling
-// shape differs at every call site (t.Fatalf vs error return), and
-// the extracted helper would be a thin layer that gains little.
+// available: a missing HYPERV_BACKEND returns an error (so
+// -sweep-allow-failures can decide whether to continue) rather than a
+// t.Skip. Returns the client, a close func the caller MUST defer, and
+// an error.
 func NewClientForSweep(ctx context.Context) (*hyperv.Client, func(), error) {
 	backend := os.Getenv("HYPERV_BACKEND")
 	if backend == "" {

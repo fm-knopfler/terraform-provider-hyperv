@@ -31,7 +31,7 @@ func (c *Client) GetVM(ctx context.Context, name string) (*VM, error) {
 	return &v, nil
 }
 
-// NewVM creates a VM and returns the canonical read shape. The script-side
+// NewVM creates a VM and returns the canonical read result. The script-side
 // sequence is New-VM (with -NoVHD -BootDevice None -- no auto-attach of
 // storage or boot device) followed by Set-VMMemory (static, with
 // DynamicMemoryEnabled=$false in the same call), Set-VMProcessor, and the
@@ -53,19 +53,14 @@ func (c *Client) NewVM(ctx context.Context, in NewVMInput) (*VM, error) {
 	return &v, nil
 }
 
-// SetVM applies a partial update and returns the post-mutation read shape
-// (set.ps1 follows the Set-* sequence with a Get-VM read-back so the
-// emitted shape matches GetVM exactly).
-//
-// Callers should populate in.Generation from prior state so set.ps1's
-// gen-2-only SecureBoot guard fires at the script layer; the Go-side
-// Update should never let SecureBoot through for a gen 1 VM (the
-// ConfigValidator catches it at plan time), but the script-layer guard
-// is defense in depth.
-//
-// Mutations on a running VM may error: vcpu, memory_bytes, and secure_boot
-// generally require the VM to be Off. The script surfaces those errors
-// verbatim -- the operator drives power transitions via hyperv_vm_state.
+// SetVM applies a partial update and returns the post-mutation read
+// result: set.ps1 follows its Set-* calls with a Get-VM read-back so the
+// result matches GetVM exactly. Callers should populate in.Generation
+// from prior state so set.ps1's gen-2-only SecureBoot guard fires as
+// defense in depth (the ConfigValidator already catches this at plan
+// time). vcpu, memory_bytes, and secure_boot generally require the VM
+// to be Off; the script surfaces those errors verbatim, since the
+// operator drives power transitions via hyperv_vm_state.
 func (c *Client) SetVM(ctx context.Context, in SetVMInput) (*VM, error) {
 	body, err := loadVMReadEmitter("set")
 	if err != nil {
@@ -103,12 +98,10 @@ func (c *Client) RemoveVM(ctx context.Context, name string) error {
 	return c.runScript(ctx, string(body), stdin, nil)
 }
 
-// VMName is the minimal shape vm/list.ps1 emits per result. Only Name is
-// carried because the sweeper (the sole caller today) only needs the
-// name to call RemoveVM. Adding more fields means slower enumeration
-// on hosts with many VMs and a wider blast radius for script-Go
-// contract drift; if a future caller needs richer shape, add a
-// separate verb rather than fattening this one.
+// VMName is the minimal format vm/list.ps1 emits per result. Only Name
+// is carried because the sweeper (the sole caller today) only needs it
+// to call RemoveVM; a future caller needing more should add a separate
+// verb rather than fattening this one.
 type VMName struct {
 	Name string `json:"Name"`
 }
@@ -116,11 +109,9 @@ type VMName struct {
 // ListVMsByPrefix returns the names of all VMs whose Name begins with
 // the given prefix (typically "tfacc-" for the acceptance-test sweeper).
 // Empty result is a normal return ([]VMName{}, nil) -- the caller can
-// distinguish "no matches" from "fault" without checking err.
-//
-// Backed by vm/list.ps1 -- see that script's header for the wire
-// contract. Read-only operation; no power transitions or other side
-// effects.
+// distinguish "no matches" from "fault" without checking err. Backed
+// by vm/list.ps1 -- see that script's header for the wire contract.
+// Read-only operation; no power transitions or other side effects.
 func (c *Client) ListVMsByPrefix(ctx context.Context, prefix string) ([]VMName, error) {
 	body, err := scripts.VMScript("list")
 	if err != nil {
@@ -141,23 +132,14 @@ func (c *Client) ListVMsByPrefix(ctx context.Context, prefix string) ([]VMName, 
 }
 
 // AttachHardDisk wires an existing VHD to a VM at a specific controller
-// slot via Add-VMHardDiskDrive. Slot semantics:
-//
-//   - (ControllerType, ControllerNumber, ControllerLocation) identifies
-//     the slot uniquely. Two attachments at the same slot is an error
-//     (Hyper-V's InvalidArgument -> ErrPSExecution).
-//   - The Path argument is the existing VHD's location -- this method
-//     does NOT create the VHD; pair with hyperv_vhd or hyperv_image_file
-//     for that.
-//   - ControllerType=IDE on a gen 2 VM errors at the cmdlet layer with
-//     a clear "cannot attach IDE devices to a generation 2 virtual
-//     machine" -- the resource-layer schema validator should catch
-//     this at plan time, but the script-side ValidateSet is defense
-//     in depth.
-//
-// Returns ErrNotFound if the VM is missing (resource Read should have
-// reconciled before this is reachable, but the path exists for safety).
-// Other errors map to ErrPSExecution and surface verbatim.
+// slot via Add-VMHardDiskDrive. (ControllerType, ControllerNumber,
+// ControllerLocation) identifies the slot uniquely; a second attachment
+// at the same slot errors. Path is the existing VHD's location; this
+// method doesn't create the VHD itself, pair it with hyperv_vhd or
+// hyperv_image_file for that. ControllerType=IDE on a gen 2 VM errors
+// at the cmdlet layer as defense in depth, since the resource-layer
+// schema validator should already catch it at plan time. Returns
+// ErrNotFound if the VM is missing; other errors map to ErrPSExecution.
 func (c *Client) AttachHardDisk(ctx context.Context, in AttachHardDiskInput) error {
 	body, err := scripts.VMScript("add-hard-disk-drive")
 	if err != nil {
@@ -173,9 +155,8 @@ func (c *Client) AttachHardDisk(ctx context.Context, in AttachHardDiskInput) err
 // DetachHardDisk removes a VHD attachment from a VM at a specific
 // controller slot via Remove-VMHardDiskDrive. The slot tuple alone
 // identifies the attachment (Path is not part of the wire payload).
-//
 // "Slot already empty" surfaces as ObjectNotFound from the cmdlet ->
-// ErrNotFound on the Go side. The resource-layer reconciliation in
+// ErrNotFound on the Go side; the resource-layer reconciliation in
 // Update treats ErrNotFound as a no-op (desired state is "empty",
 // already met). Other errors map to ErrPSExecution.
 func (c *Client) DetachHardDisk(ctx context.Context, in DetachHardDiskInput) error {
@@ -193,7 +174,6 @@ func (c *Client) DetachHardDisk(ctx context.Context, in DetachHardDiskInput) err
 // AttachNetworkAdapter adds a new NIC to a VM and binds it to the
 // named virtual switch via Add-VMNetworkAdapter. The display name is
 // the slot key used by the resource-layer Update reconciliation.
-//
 // Returns ErrNotFound if the VM is missing. Switch-not-found surfaces
 // as ErrPSExecution (Hyper-V's InvalidArgument category isn't routed
 // to a typed sentinel for this cmdlet).
@@ -299,14 +279,12 @@ func (c *Client) SetVMState(ctx context.Context, in SetVMStateInput) (*VM, error
 
 // loadVMReadEmitter loads a verb script (get/new/set/set-state) and
 // prepends the canonical Read-HypervVMResult body from
-// vm/read-result.ps1 so the verb's tail call to that function resolves.
-//
-// Until 2026-04 each of these four scripts inlined Read-HypervVMResult
-// verbatim because the runtime concatenates only preamble + a single
-// verb script per call (no cross-script helpers). Lifting the function
-// out of each script into a single canonical read-result.ps1 reduces
-// the bug surface (four copies could drift) at the cost of one extra
-// fs read here.
+// vm/read-result.ps1 so the verb's tail call to that function
+// resolves, since the runtime concatenates only preamble + a single
+// verb script per call (no cross-script helpers). Sharing one
+// canonical read-result.ps1 across all four scripts, rather than each
+// carrying its own copy, costs one extra fs read here in exchange for
+// a single source of truth.
 func loadVMReadEmitter(verb string) (string, error) {
 	body, err := scripts.VMScript(verb)
 	if err != nil {
